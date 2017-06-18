@@ -1,3 +1,6 @@
+require_relative 'services/create_user_service'
+require_relative 'services/subscription_service'
+
 class UserFileImportProcess
 
   include Sidekiq::Worker
@@ -7,34 +10,11 @@ class UserFileImportProcess
     @file = UserFile.find(file_id)
     before_perform
     begin
-      file_url = @file.file.url
-      file = File.open(UrlFileReader.read(file_url), 'r:windows-1251')
       @count = 0
-      file.each_line do |line|
-        data = line.split(';')
-        email = data[0].strip.downcase
+      parse_user_file(@file.file.url) do |email, category_id|
         if ValidatesEmailFormatOf::validate_email_format(email).nil?
-          category = AdvtCategory.find_by_id(data[1])
-          user = User.find_by_email(email)
-          unless user.present?
-            password = Array.new(6) { (rand(122-97) + 97).chr }.join
-            user = User.new(login: email, password: password, email: email, is_imported: true)
-            if user.valid?
-              user.skip_confirmation!
-              user.save
-              user.confirm!
-              begin
-                UserMailer.welcome_email(user, password).deliver if @file.registrate?
-              rescue Exception => e
-                Airbrake.notify(e)
-              end
-            end
-          end
-          if @file.registrate? && category && user.subscriptions.where(category_id: category.id).empty?
-              subscription = Subscription.new(user_id: user.id, category_id: category.id)
-              subscription.save
-          end
-          user.update_attribute(:subscribed_to_sevastopol_news, true) if @file.registrate?
+          user = CreateUserService.new.from_email(email, @file.registrate?)
+          SubscriptionService.new(user).subscribe(category_id) if @file.registrate?
           @count += 1
         end
       end
@@ -60,5 +40,16 @@ class UserFileImportProcess
     @file.update_attribute(:parsing_status, 'error')
   end
 
-end
+  protected
 
+  def parse_user_file(file_url)
+    file = File.open(UrlFileReader.read(file_url), 'r:windows-1251')
+    file.each_line do |line|
+      data = line.split(';')
+      email = data[0].strip.downcase
+      category_id = data[1]
+      yield(email, category_id)
+    end
+  end
+
+end
